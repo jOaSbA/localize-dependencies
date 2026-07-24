@@ -40,9 +40,9 @@
       "kicad_version": "10.0",
       "runtime": "ipc",
       "download_url": "https://github.com/jOaSbA/localize-dependencies/releases/download/v1.0.1/localize-dependencies-1.0.1.zip",
-      "download_sha256": "74a70c3dc7c28d55a1d3c398a4abd963e0185ceb5e75b580a2b372b6fe6fdf83",
-      "download_size": 21316,
-      "install_size": 59154
+      "download_sha256": "343e29f612e3a882eb2c22f4b37f0340d9dcf4de1aac7f657a8172e031c8f4ea",
+      "download_size": 21435,
+      "install_size": 59309
     }
   ]
 }

@@ -1,2 +1,5 @@
 kicad-python>=0.7.1
 wxPython~=4.2
+# Pin protobuf so the venv doesn't fall back to an old system protobuf that
+# lacks google.protobuf.runtime_version (KiCad 10 on Linux).
+protobuf>=5.26,<6
