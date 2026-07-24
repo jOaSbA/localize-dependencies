@@ -1,0 +1,38 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "Localize Dependencies",
+  "description": "Copy a project's external symbols, footprints and 3D models into local libraries so it opens on any machine. IPC-based (KiCad 10+) and reversible.",
+  "description_full": "Makes a KiCad project self-contained. It copies the external symbols, footprints, and 3D models a project uses into project-local libraries and updates every reference, so the schematic, board, 3D view, and STEP export still work on any machine even when the original global or third-party libraries aren't installed.\n\n- It handles symbols, footprints, and 3D models, not only one of them. You can localize any combination in a single pass.\n- It uses the IPC API (kicad-python / kipy), so it runs on KiCad 10 and keeps running on KiCad 11 and later, where the old SWIG bindings are gone.\n- Revert is exact. Each file is backed up before it is touched, and one click puts the project back the way it was and removes the local copies.\n- You can localize just the parts you want.\n- Ticking 'include standard KiCad libraries' also pulls in the stock libs, so the project depends on nothing installed globally.\n\nThe plugin connects over IPC only to locate the open project, then edits the project files on disk with a small S-expression parser that rewrites only the references it needs and leaves every other byte alone.\n\nTo use, save the project, run the plugin, then reopen it in KiCad to pick up the changes.",
+  "identifier": "com.github.jOaSbA.localize-dependencies",
+  "type": "plugin",
+  "author": {
+    "name": "jOaSbA",
+    "contact": {
+      "web": "https://github.com/jOaSbA"
+    }
+  },
+  "license": "GPL-3.0",
+  "resources": {
+    "Homepage": "https://github.com/jOaSbA/localize-dependencies",
+    "Bug Tracker": "https://github.com/jOaSbA/localize-dependencies/issues"
+  },
+  "tags": [
+    "libraries",
+    "localize",
+    "portable",
+    "symbols",
+    "footprints"
+  ],
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "stable",
+      "kicad_version": "10.0",
+      "runtime": "ipc",
+      "download_url": "https://github.com/jOaSbA/localize-dependencies/releases/download/v1.0.0/localize-dependencies-1.0.0.zip",
+      "download_sha256": "44db2e365f31b2d0f1af671f995dace3143fdcd1e7dcb44b0b9948191bb5f115",
+      "download_size": 19887,
+      "install_size": 55177
+    }
+  ]
+}
