@@ -1,0 +1,30 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.github.jOaSbA.localize-dependencies",
+  "name": "Localize Dependencies",
+  "description": "Copy a project's external symbols, footprints, and 3D models into project-local libraries",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.9"
+  },
+  "actions": [
+    {
+      "identifier": "localize-dependencies",
+      "name": "Localize Dependencies",
+      "description": "Make the project self-contained: localize symbols, footprints, and 3D models; fully reversible",
+      "show-button": true,
+      "scopes": [
+        "pcb"
+      ],
+      "entrypoint": "localize_dependencies_action.py",
+      "icons-light": [
+        "icon.png",
+        "icon@2x.png"
+      ],
+      "icons-dark": [
+        "icon.png",
+        "icon@2x.png"
+      ]
+    }
+  ]
+}
