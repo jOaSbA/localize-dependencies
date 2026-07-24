@@ -24,6 +24,7 @@ from kipy.errors import ConnectionError as KiCadConnectionError
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import portability  # noqa: E402
 from _win_dialog import get_foreground_hwnd, attach_to_kicad  # noqa: E402
+from _mac_dialog import attach_to_stage_manager, prepare_app  # noqa: E402
 
 TITLE = "Localize Dependencies"
 
@@ -367,6 +368,7 @@ class LocalizeDialog(wx.Dialog):
 def main():
     foreground_hwnd = get_foreground_hwnd()
     app = wx.App()  # noqa: F841
+    prepare_app()
 
     try:
         kicad = KiCad()
@@ -402,6 +404,7 @@ def main():
 
     dlg = LocalizeDialog(project_dir, rows)
     attach_to_kicad(dlg, foreground_hwnd, board)
+    attach_to_stage_manager(dlg)
     dlg.CentreOnScreen()
     del busy
     try:
