@@ -83,7 +83,7 @@ def main():
     latest["download_sha256"] = sha256
     latest["download_size"] = download_size
     latest["install_size"] = install_size
-    with open(meta_path, "w", encoding="utf-8") as fh:
+    with open(meta_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(meta, fh, indent=2)
         fh.write("\n")
 
