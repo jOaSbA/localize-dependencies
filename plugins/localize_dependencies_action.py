@@ -15,8 +15,20 @@
 import os
 import re
 import sys
+import sysconfig
 
-import wx
+# KiCad builds the plugin venv with --system-site-packages and scrubs PYTHONPATH
+# only on Windows (api_plugin_manager.cpp), so elsewhere a PYTHONPATH pointing at
+# the distro's dist-packages sits ahead of the venv and google.protobuf resolves
+# to the system copy, which is older than kipy needs. Put the venv back in front
+# before the first third-party import. Issue #2.
+if sys.prefix != sys.base_prefix:
+    _venv_site = sysconfig.get_path("purelib")
+    if _venv_site in sys.path:
+        sys.path.remove(_venv_site)
+    sys.path.insert(0, _venv_site)
+
+import wx  # noqa: E402
 
 from kipy import KiCad
 from kipy.errors import ConnectionError as KiCadConnectionError

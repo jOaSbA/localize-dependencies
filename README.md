@@ -47,6 +47,8 @@ reads that back and deletes anything the run created.
 - KiCad 10.0 or newer, with the IPC API server enabled under
   *Preferences > Plugins*.
 - `kicad-python` and `wxPython`, which KiCad installs for you on first run.
+  On Linux wxPython has no prebuilt package, so it comes from your
+  distribution instead (`python3-wxgtk4.0` on Debian and Ubuntu).
 
 ## Install
 

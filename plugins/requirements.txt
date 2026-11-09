@@ -1,5 +1,9 @@
 kicad-python>=0.7.1
-wxPython~=4.2
+# wxPython publishes no Linux wheels, and KiCad installs with --only-binary
+# :all:, so on Linux this line has no candidate and aborts the whole resolve
+# before anything else installs. There wx comes from the distro package that
+# --system-site-packages already puts in scope. Issue #2.
+wxPython~=4.2; sys_platform == "win32" or sys_platform == "darwin"
 # Pin protobuf so the venv doesn't fall back to an old system protobuf that
 # lacks google.protobuf.runtime_version (KiCad 10 on Linux).
 protobuf>=5.26,<6
