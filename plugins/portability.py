@@ -54,7 +54,26 @@ _INSTALL_GLOBS = (
 _VERSIONED_VAR = re.compile(r"KICAD(\d+)_(\w+)")
 
 
+EMBEDDED = "kicad-embed://"               # a model stored inside the board
+LIB_TABLES = ("fp-lib-table", "sym-lib-table")
+
+
 # --- path resolution ---------------------------------------------------------
+
+def _inside(path, folder):
+    """True if `path` is `folder` itself or somewhere below it. A plain prefix
+    test would count share/kicad-extra-libs as part of share/kicad."""
+    a = os.path.normcase(os.path.abspath(path))
+    b = os.path.normcase(os.path.abspath(folder))
+    try:
+        return os.path.commonpath([a, b]) == b
+    except ValueError:      # different drives on Windows
+        return False
+
+
+def _is_autosave(path):
+    return os.path.basename(path).startswith("_autosave-")
+
 
 def _version_key(path):
     """Sort key: newest KiCad version first. A plain string sort ranks "9.0"
@@ -105,7 +124,7 @@ def make_resolver(project_dir):
                 fallbacks[suffix] = d
 
     def resolve(raw):
-        if not raw:
+        if not raw or raw.startswith(EMBEDDED):
             return raw
         s = re.sub(r"\$\(([^)]+)\)", r"${\1}", raw)   # $(VAR) -> ${VAR}
 
@@ -124,6 +143,8 @@ def make_resolver(project_dir):
             return m.group(0)
 
         s = re.sub(r"\$\{([^}]+)\}", repl, s)
+        if "${" not in s and not os.path.isabs(s):
+            s = os.path.join(project_dir, s)   # KiCad looks in the project first
         return os.path.normpath(s)
 
     return resolve
@@ -183,7 +204,7 @@ def _table_rows(path, stamp):
 
 
 def _find_in_table(path, nickname, resolve, seen):
-    """uri for `nickname` in one table, following KiCad 10's nested
+    """(uri, type) for `nickname` in one table, following KiCad 10's nested
     (type "Table") entries. The KiCad 10 global table holds the stock libraries
     only through such an entry pointing at the install's template table."""
     path = os.path.normpath(path)
@@ -197,7 +218,7 @@ def _find_in_table(path, nickname, resolve, seen):
             if uri:
                 nested.append(uri)
         elif name == nickname and uri:
-            return uri
+            return uri, typ
     for uri in nested:
         sub = resolve(uri)
         share = _install_share()
@@ -211,11 +232,12 @@ def _find_in_table(path, nickname, resolve, seen):
     return None
 
 
-def resolve_lib_uri(project_dir, table_name, nickname):
-    """Resolve a library nickname to its uri the way KiCad does: the project
+def resolve_lib(project_dir, table_name, nickname):
+    """(uri, type) of a library nickname, found the way KiCad does: the project
     table first, then the global table of the newest KiCad version that has
     one. Older versions' tables are left alone; KiCad never reads them, and
-    their stale ${KICAD9_*} entries are what issue #2 tripped over."""
+    their stale ${KICAD9_*} entries are what issue #2 tripped over.
+    (None, None) if no table has it."""
     resolve = make_resolver(project_dir)
     tables = [os.path.join(project_dir, table_name)]
     tables += [os.path.join(d, table_name) for d in _config_dirs()
@@ -224,7 +246,29 @@ def resolve_lib_uri(project_dir, table_name, nickname):
         hit = _find_in_table(t, nickname, resolve, set())
         if hit:
             return hit
-    return None
+    return None, None
+
+
+def resolve_lib_uri(project_dir, table_name, nickname):
+    """uri of a library nickname, or None. See resolve_lib()."""
+    return resolve_lib(project_dir, table_name, nickname)[0]
+
+
+def _supported(lib_type):
+    """Only KiCad-format libraries can be copied file for file. A Legacy .lib
+    or a Database/HTTP library copied into a .kicad_sym would not load."""
+    return lib_type is None or lib_type.lower() == "kicad"
+
+
+def _local_nick(project_dir, table_name, nick, uri_for):
+    """Nickname for the local copy of `nick`: nick_local, or nick_local_1, ...
+    when the project table already uses that name for some other library."""
+    existing = parse_lib_table(os.path.join(project_dir, table_name))
+    cand, n = nick + LOCAL_SUFFIX, 0
+    while cand in existing and existing[cand] != uri_for(cand):
+        n += 1
+        cand = "{}{}_{}".format(nick, LOCAL_SUFFIX, n)
+    return cand
 
 
 def _table_header(kind):
@@ -263,14 +307,16 @@ def add_lib_entries(session, kind, entries):
 
 def classify(raw, project_dir):
     """external / standard / local / missing for a raw model path."""
-    if "${KIPRJMOD}" in raw:
+    if raw.startswith(EMBEDDED):
         return "local"
     resolved = make_resolver(project_dir)(raw)
-    is_std = bool(re.search(r"\$\{KICAD\d*_3DMODEL_DIR\}", raw)) or (
-        _install_share() and _install_share().replace("\\", "/").lower()
-        in resolved.replace("\\", "/").lower())
+    if _inside(resolved, project_dir):
+        return "local"
     if not os.path.isfile(resolved):
         return "missing"
+    share = _install_share()
+    is_std = bool(re.search(r"\$[{(]KICAD\d*_3DMODEL_DIR[)}]", raw)) or bool(
+        share and _inside(resolved, share))
     return "standard" if is_std else "external"
 
 
@@ -422,10 +468,17 @@ def revert(project_dir, force=False):
     skip = set() if force else set(revert_conflicts(project_dir))
     for rel in sorted(skip):
         errors.append("skipped {}: changed since localize".format(rel))
+    # A skipped file may still point at the local libraries and models, so a
+    # partial revert keeps those and the library tables until a full one.
+    keep_libs = bool(skip)
+    if keep_libs:
+        errors.append("kept the local libraries, models and library tables, "
+                      "which the skipped files may still use")
 
     kept_backed, kept_created = [], []   # still pending after this revert
     for entry in man.get("backed_up", []):
-        if entry["path"] in skip:
+        if entry["path"] in skip or (
+                keep_libs and os.path.basename(entry["path"]) in LIB_TABLES):
             kept_backed.append(entry)
             continue
         src = os.path.join(state_dir, entry["backup"])
@@ -438,7 +491,7 @@ def revert(project_dir, force=False):
             errors.append("restore {}: {}".format(entry["path"], exc))
 
     for rel in man.get("created_files", []):
-        if rel in skip:
+        if rel in skip or keep_libs:
             kept_created.append(rel)
             continue
         p = os.path.join(project_dir, rel)
@@ -510,6 +563,48 @@ def _symbol_instances(root):
     return [s for s in root.find_all("symbol") if s.find("lib_id")]
 
 
+def _schematics(project_dir):
+    """Every schematic of the project: the top-level files plus the sheets they
+    reference, in subfolders too. Autosaves are skipped, and so are sheets
+    outside the project, so a sheet shared with another project is never
+    rewritten."""
+    project_dir = os.path.abspath(project_dir)
+    todo = [p for p in glob.glob(os.path.join(project_dir, "*.kicad_sch"))
+            if not _is_autosave(p)]
+    seen, out = set(), []
+    while todo:
+        path = os.path.abspath(todo.pop(0))
+        key = os.path.normcase(path)
+        if key in seen or not os.path.isfile(path) or not _inside(path, project_dir):
+            continue
+        seen.add(key)
+        out.append(path)
+        for sheet in sexpr.parse(_read(path)).find_all("sheet"):
+            name = _prop(sheet, "Sheetfile") or _prop(sheet, "Sheet file")
+            if name:
+                name = name.replace("\\", "/")
+                # relative to the parent sheet; to the project as a fallback
+                near = os.path.join(os.path.dirname(path), name)
+                todo.append(near if os.path.isfile(near)
+                            else os.path.join(project_dir, name))
+    return sorted(out)
+
+
+def _boards(project_dir):
+    return sorted(p for p in glob.glob(os.path.join(project_dir, "*.kicad_pcb"))
+                  if not _is_autosave(p))
+
+
+def _symbol_refs(sym):
+    """Every reference a schematic symbol carries: its Reference field plus one
+    per sheet instance (a sheet used twice gives R101 and R201)."""
+    refs = {_prop(sym, "Reference")}
+    refs.update(n.children[1].value for n in sym.iter_lists()
+                if n.head() == "reference" and len(n.children) > 1)
+    refs.discard(None)
+    return refs
+
+
 def scan_items(project_dir, include_standard=False):
     """One row per symbol, footprint, and 3D model, each with a stable selection
     key. Read-only. A row is a dict: type, ref, name, source, status, key, wanted.
@@ -520,8 +615,15 @@ def scan_items(project_dir, include_standard=False):
       model     ('model', pcb_rel, footprint_index, model_index)
     """
     rows = []
+    resolve = make_resolver(project_dir)
 
-    for sch in sorted(glob.glob(os.path.join(project_dir, "*.kicad_sch"))):
+    def lib_status(table, nick):
+        uri, typ = resolve_lib(project_dir, table, nick)
+        if uri and not _supported(typ):
+            return uri, "unsupported"
+        return uri, classify_lib(uri, project_dir)
+
+    for sch in _schematics(project_dir):
         rel = os.path.relpath(sch, project_dir).replace(os.sep, "/")
         root = sexpr.parse(_read(sch))
         for i, sym in enumerate(_symbol_instances(root)):
@@ -530,14 +632,13 @@ def scan_items(project_dir, include_standard=False):
                 continue
             libid = lid.children[1].value
             nick = libid.split(":", 1)[0] if ":" in libid else ""
-            uri = resolve_lib_uri(project_dir, "sym-lib-table", nick) if nick else None
-            cat = classify_lib(uri, project_dir) if nick else "local"
+            uri, cat = lib_status("sym-lib-table", nick) if nick else (None, "local")
             rows.append({"type": "symbol", "ref": _prop(sym, "Reference") or "?",
                          "name": libid, "source": uri or "", "status": cat,
                          "key": ("symbol", rel, i),
                          "wanted": _wanted(cat, include_standard)})
 
-    for pcb in sorted(glob.glob(os.path.join(project_dir, "*.kicad_pcb"))):
+    for pcb in _boards(project_dir):
         rel = os.path.relpath(pcb, project_dir).replace(os.sep, "/")
         root = sexpr.parse(_read(pcb))
         for fi, fp in enumerate(root.find_all("footprint")):
@@ -546,8 +647,10 @@ def scan_items(project_dir, include_standard=False):
             fpid = fp.children[1].value
             ref = _prop(fp, "Reference") or "?"
             nick = fpid.split(":", 1)[0] if ":" in fpid else ""
-            uri = resolve_lib_uri(project_dir, "fp-lib-table", nick) if nick else None
-            cat = classify_lib(uri, project_dir) if nick else "local"
+            uri, cat = lib_status("fp-lib-table", nick) if nick else (None, "local")
+            if cat in ("external", "standard") and not os.path.isfile(os.path.join(
+                    resolve(uri), fpid.split(":", 1)[1] + ".kicad_mod")):
+                cat = "missing"     # the library is there, this footprint is not
             rows.append({"type": "footprint", "ref": ref, "name": fpid,
                          "source": uri or "", "status": cat,
                          "key": ("footprint", rel, fi),
@@ -676,14 +779,14 @@ def classify_lib(uri, project_dir):
     """external / standard / local / missing for a library uri."""
     if not uri:
         return "missing"
-    if "${KIPRJMOD}" in uri:
-        return "local"
     resolved = make_resolver(project_dir)(uri)
-    share = _install_share()
-    is_std = bool(re.search(r"\$\{KICAD\d*_(FOOTPRINT|SYMBOL)_DIR\}", uri)) or (
-        share and share.replace("\\", "/").lower() in resolved.replace("\\", "/").lower())
+    if _inside(resolved, project_dir):
+        return "local"
     if not os.path.exists(resolved):
         return "missing"
+    share = _install_share()
+    is_std = bool(re.search(r"\$[{(]KICAD\d*_(FOOTPRINT|SYMBOL)_DIR[)}]", uri)) or bool(
+        share and _inside(resolved, share))
     return "standard" if is_std else "external"
 
 
@@ -708,6 +811,8 @@ def localize_footprints(session, rows):
 
     entries = {}
     src_dir_cache = {}
+    local_of = {}   # nick -> local nickname
+    moved = set()   # (old fpid, new fpid)
     copied = remapped = 0
     for rel, kset in by_pcb.items():
         pcb = os.path.join(project_dir, rel)
@@ -724,25 +829,64 @@ def localize_footprints(session, rows):
             if nick not in src_dir_cache:
                 src_dir_cache[nick] = resolve(
                     resolve_lib_uri(project_dir, "fp-lib-table", nick) or "")
-            local_nick = nick + LOCAL_SUFFIX
+                local_of[nick] = _local_nick(
+                    project_dir, "fp-lib-table", nick,
+                    lambda n: "${{KIPRJMOD}}/{}/{}{}".format(
+                        LOCAL_LIB_DIRNAME, n, LOCAL_FP_SUFFIX))
+            local_nick = local_of[nick]
             local_dir = os.path.join(project_dir, LOCAL_LIB_DIRNAME,
                                      local_nick + LOCAL_FP_SUFFIX)
-            session.mkdir(local_dir)
             src_file = os.path.join(src_dir_cache[nick], name + ".kicad_mod")
             dst_file = os.path.join(local_dir, name + ".kicad_mod")
+            if not (os.path.isfile(src_file) or os.path.isfile(dst_file)):
+                continue    # nothing to copy: remapping would break the part
+            session.mkdir(local_dir)
             if os.path.isfile(src_file) and not os.path.isfile(dst_file):
                 session.wrote_new_file(dst_file)
                 _copy_in(src_file, dst_file)
                 session.written(dst_file)
                 copied += 1
-            editor.replace_atom(atom, "{}:{}".format(local_nick, name), force_quote=True)
+            new_id = "{}:{}".format(local_nick, name)
+            editor.replace_atom(atom, new_id, force_quote=True)
             entries[local_nick] = "${{KIPRJMOD}}/{}/{}{}".format(
                 LOCAL_LIB_DIRNAME, local_nick, LOCAL_FP_SUFFIX)
             remapped += 1
+            moved.add((atom.value, new_id))
         write_validated(session, pcb, editor.result())
 
     add_lib_entries(session, "fp", entries)
+    _update_footprint_fields(session, moved)
     return {"libraries": len(entries), "files_copied": copied, "remapped": remapped}
+
+
+def _update_footprint_fields(session, moved):
+    """Point the schematic's Footprint fields at the localized footprints, or
+    Update PCB from Schematic would put the external ones back. `moved` holds
+    (old fpid, new fpid) pairs. A field changes only once every reference of
+    its symbol uses the same new footprint on the board, so a reused sheet
+    with one instance still external keeps its field, which still resolves."""
+    on_board = {}   # reference -> fpid, as the boards are now
+    for pcb in _boards(session.project_dir):
+        for fp in sexpr.parse(_read(pcb)).find_all("footprint"):
+            ref = _prop(fp, "Reference")
+            if ref and fp.children[1:]:
+                on_board[ref] = fp.children[1].value
+    for sch in _schematics(session.project_dir):
+        text = _read(sch)
+        editor = sexpr.Editor(text)
+        touched = False
+        for sym in _symbol_instances(sexpr.parse(text)):
+            ids = {on_board.get(r) for r in _symbol_refs(sym)}
+            if len(ids) != 1 or None in ids:
+                continue
+            new = ids.pop()
+            for c in sym.find_all("property"):
+                if (len(c.children) >= 3 and c.children[1].value == "Footprint"
+                        and (c.children[2].value, new) in moved):
+                    editor.replace_atom(c.children[2], new, force_quote=True)
+                    touched = True
+        if touched:
+            write_validated(session, sch, editor.result())
 
 
 def localize_symbols(session, rows):
@@ -765,17 +909,21 @@ def localize_symbols(session, rows):
         return {"libraries": 0, "files_copied": 0, "remapped": 0}
 
     src_file = {}   # nick -> resolved source .kicad_sym
+    local_of = {}   # nick -> local nickname
     for nick in nicks:
-        uri = resolve_lib_uri(project_dir, "sym-lib-table", nick)
-        if uri:
+        uri, typ = resolve_lib(project_dir, "sym-lib-table", nick)
+        if uri and _supported(typ):
             src_file[nick] = resolve(uri)
+            local_of[nick] = _local_nick(
+                project_dir, "sym-lib-table", nick,
+                lambda n: "${{KIPRJMOD}}/{}/{}.kicad_sym".format(LOCAL_LIB_DIRNAME, n))
     if not src_file:
         return {"libraries": 0, "files_copied": 0, "remapped": 0}
 
     entries = {}
     copied = 0
     for nick, sfile in src_file.items():
-        local_nick = nick + LOCAL_SUFFIX
+        local_nick = local_of[nick]
         local_lib = os.path.join(project_dir, LOCAL_LIB_DIRNAME, local_nick + ".kicad_sym")
         session.mkdir(os.path.dirname(local_lib))
         if os.path.isfile(sfile) and not os.path.isfile(local_lib):
@@ -787,7 +935,7 @@ def localize_symbols(session, rows):
             LOCAL_LIB_DIRNAME, local_nick)
 
     remapped = 0
-    for sch in glob.glob(os.path.join(project_dir, "*.kicad_sch")):
+    for sch in _schematics(project_dir):
         text = _read(sch)
         root = sexpr.parse(text)
         editor = sexpr.Editor(text)
@@ -799,7 +947,7 @@ def localize_symbols(session, rows):
                 return
             nick, name = atom.value.split(":", 1)
             if nick in src_file:
-                editor.replace_atom(atom, "{}:{}".format(nick + LOCAL_SUFFIX, name),
+                editor.replace_atom(atom, "{}:{}".format(local_of[nick], name),
                                     force_quote=True)
                 remapped += 1
                 touched = True

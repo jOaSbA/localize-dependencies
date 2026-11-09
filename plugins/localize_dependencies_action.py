@@ -44,7 +44,8 @@ COL_TYPE, COL_REF, COL_NAME, COL_SOURCE, COL_STATUS = range(5)
 _COL_TITLES = ("Type", "Reference", "Name", "Source", "Status")
 GREY = wx.Colour(140, 140, 140)
 # Sort order when sorting by status: the localizable rows come first.
-_STATUS_ORDER = {"external": 0, "standard": 1, "missing": 2, "local": 3}
+_STATUS_ORDER = {"external": 0, "standard": 1, "missing": 2, "unsupported": 3,
+                 "local": 4}
 _TYPE_ORDER = {"symbol": 0, "footprint": 1, "model": 2}
 
 
@@ -180,7 +181,8 @@ class LocalizeDialog(wx.Dialog):
 
     def _status_label(self, row):
         return {"external": "external", "standard": "standard lib",
-                "local": "already local", "missing": "MISSING"}.get(
+                "local": "already local", "missing": "MISSING",
+                "unsupported": "not a KiCad library"}.get(
                     row["status"], row["status"])
 
     def _update_summary(self):
@@ -359,7 +361,9 @@ class LocalizeDialog(wx.Dialog):
                 "\n".join(conflicts[:15]) +
                 ("\n..." if len(conflicts) > 15 else "") +
                 "\n\nYes: revert them anyway (those later edits are lost).\n"
-                "No: revert everything else and leave these as they are.",
+                "No: revert everything else and leave these as they are. The "
+                "local libraries stay until a full revert, since these files "
+                "may still use them.",
                 wx.YES_NO | wx.CANCEL | wx.ICON_WARNING)
             if answer == wx.CANCEL:
                 return

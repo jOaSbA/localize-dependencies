@@ -93,7 +93,9 @@ first Localize and removes the local copies, however many times you ran it, and
 also after a run that failed part-way. Copies never overwrite an existing file:
 a 3D model that clashes with one already in `packages3D/` gets a `_1` suffix.
 If you edited a file after localizing, Revert asks before throwing that edit
-away. Since it works on files on disk, get in the habit of saving before you run
+away. If you keep the edit, the local libraries and library tables stay too,
+since that file may still use them, and a later Revert can finish the job.
+Since it works on files on disk, get in the habit of saving before you run
 it and reloading after, and keep important projects under version control.
 
 ## Testing
