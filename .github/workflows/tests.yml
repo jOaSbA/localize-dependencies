@@ -30,6 +30,8 @@ jobs:
         run: |
           python tests/test_safety.py
           python tests/test_versions.py
+          python tests/test_paths.py
+          python tests/test_engine.py
           xvfb-run -a python tests/test_dialog.py
 
   # Localizes KiCad's own demo projects and has kicad-cli judge the result.

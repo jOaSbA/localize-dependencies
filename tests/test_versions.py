@@ -36,18 +36,19 @@ def test_config_dirs_newest_first():
     var = "APPDATA" if os.name == "nt" else "HOME"
     base = os.path.join(root, "kicad") if os.name == "nt" else \
         os.path.join(root, ".config", "kicad")
-    real = os.environ.get(var)
+    saved = dict(os.environ)
     try:
         for v in VERSIONS:
             os.makedirs(os.path.join(base, v))
+        # these override the platform default (CI runners set XDG_CONFIG_HOME)
+        os.environ.pop("KICAD_CONFIG_HOME", None)
+        os.environ.pop("XDG_CONFIG_HOME", None)
         os.environ[var] = root
         got = [os.path.basename(d) for d in portability._config_dirs()]
         assert got == ["10.0", "9.0", "8.0", "6.0"], got
     finally:
-        if real is None:
-            del os.environ[var]
-        else:
-            os.environ[var] = real
+        os.environ.clear()
+        os.environ.update(saved)
         shutil.rmtree(root)
 
 
