@@ -98,7 +98,9 @@ def _kicad_verdict(proj, env, work, tag):
     copy = os.path.join(work, "cli-" + tag)
     shutil.copytree(proj, copy)
     proj = copy
-    pcb = next(f for f in os.listdir(proj) if f.endswith(".kicad_pcb"))
+    # the board named after the project; a demo can ship more than one
+    pro = next(f for f in os.listdir(proj) if f.endswith(".kicad_pro"))
+    pcb = os.path.splitext(pro)[0] + ".kicad_pcb"
     sch = os.path.splitext(pcb)[0] + ".kicad_sch"
     out = os.path.join(work, "out-" + tag)
     os.makedirs(out, exist_ok=True)
@@ -107,10 +109,14 @@ def _kicad_verdict(proj, env, work, tag):
         return subprocess.run([CLI] + list(args), env=env, capture_output=True,
                               text=True, encoding="utf-8", errors="replace")
 
-    cli("pcb", "drc", "--format", "json", "--severity-all",
+    # --schematic-parity: a Footprint field left pointing at the external
+    # library shows up as a schematic/board mismatch after localize
+    cli("pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity",
         "-o", os.path.join(out, "drc.json"), os.path.join(proj, pcb))
     with open(os.path.join(out, "drc.json"), encoding="utf-8") as fh:
-        drc = collections.Counter((v["type"], _items(v)) for v in json.load(fh)["violations"])
+        drc_json = json.load(fh)
+    drc = collections.Counter((v["type"], _items(v)) for v in
+                              drc_json["violations"] + drc_json.get("schematic_parity", []))
 
     cli("sch", "erc", "--format", "json", "--severity-all",
         "-o", os.path.join(out, "erc.json"), os.path.join(proj, sch))
@@ -191,6 +197,11 @@ def test_pic_programmer():
 
 def test_openair_max():
     _run("openair-max")
+
+
+def test_multichannel():
+    # repeated sheets: one Footprint field shared by several references
+    _run("multichannel")
 
 
 def _run(demo):

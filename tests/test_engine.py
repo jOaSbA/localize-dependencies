@@ -381,11 +381,308 @@ def test_missing_model_is_not_wanted():
 def test_model_under_the_library_var_is_standard():
     with tmp() as root:
         write(os.path.join(root, "lib3d", "R.3dshapes", "R.step"), "x")
+        proj = os.path.join(root, "proj")
         with env(KICAD10_3DMODEL_DIR=os.path.join(root, "lib3d")):
             assert portability.classify("${KICAD10_3DMODEL_DIR}/R.3dshapes/R.step",
-                                        root) == "standard"
+                                        proj) == "standard"
             assert portability.classify("${KICAD9_3DMODEL_DIR}/R.3dshapes/R.step",
-                                        root) == "standard"
+                                        proj) == "standard"
+
+
+# --- found in review, fixed in 1.0.3 --------------------------------------------
+
+def test_unforced_revert_keeps_what_a_kept_file_needs():
+    # The board is re-saved after localize, so an unforced revert skips it.
+    # It still says Lib_local:R, so its library must survive the revert.
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        localize(proj, rows(proj, "footprint"))
+        pcb = os.path.join(proj, "board.kicad_pcb")
+        write(pcb, read(pcb).replace("R1", "R9"))
+        portability.revert(proj)
+        got = [(r["name"], r["status"]) for r in rows(proj, "footprint")]
+        assert got == [("Lib_local:R", "local")], got
+
+
+def test_footprint_missing_from_its_library_is_not_remapped():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:Gone" (property "Reference" "U1"))\n',
+                          libs=(("Lib", ()),))
+        r = rows(proj, "footprint")
+        localize(proj, [x for x in r if x["wanted"]])
+        assert '"Lib:Gone"' in read(os.path.join(proj, "board.kicad_pcb")), \
+            "remapped to a local library that does not hold the footprint"
+
+
+def test_legacy_symbol_library_is_not_offered():
+    # A .lib copied to a .kicad_sym and registered as type KiCad will not load.
+    with tmp() as root, env():
+        proj = os.path.join(root, "proj")
+        leg = os.path.join(root, "old.lib")
+        write(leg, "EESchema-LIBRARY Version 2.4\nDEF R R 0 0 N Y 1 F N\nENDDEF\n")
+        write(os.path.join(proj, "sym-lib-table"),
+              table("sym", ("Old", "Legacy", fwd(leg))))
+        write(os.path.join(proj, "a.kicad_sch"),
+              '(kicad_sch (lib_symbols (symbol "Old:R")) '
+              '(symbol (lib_id "Old:R") (property "Reference" "R1")))\n')
+        r = rows(proj, "symbol")[0]
+        assert not r["wanted"], r
+
+
+def test_existing_local_nickname_is_not_hijacked():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        other = os.path.join(root, "ext", "Other.pretty")
+        write(os.path.join(other, "R.kicad_mod"), '(footprint "other R")\n')
+        write(os.path.join(proj, "fp-lib-table"), table(
+            "fp", ("Lib", "KiCad", fwd(os.path.join(root, "ext", "Lib.pretty"))),
+            ("Lib_local", "KiCad", fwd(other))))
+        localize(proj, rows(proj, "footprint"))
+        name = rows(proj, "footprint")[0]["name"]
+        uri = portability.resolve_lib_uri(proj, "fp-lib-table", name.split(":")[0])
+        assert uri.startswith("${KIPRJMOD}/libs/"), (name, uri)
+
+
+def test_schematic_footprint_field_follows_the_board():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        sch = os.path.join(proj, "board.kicad_sch")
+        write(sch, '(kicad_sch (symbol (lib_id "Device:R") (property "Reference" "R1") '
+                   '(property "Footprint" "Lib:R")))\n')
+        localize(proj, rows(proj, "footprint"))
+        sym = sexpr.parse(read(sch)).find("symbol")
+        assert portability._prop(sym, "Footprint") == "Lib_local:R", \
+            "Update PCB from Schematic would undo the localize"
+
+
+def test_sheet_in_a_subfolder_is_scanned_and_remapped():
+    with tmp() as root, env():
+        proj = os.path.join(root, "proj")
+        lib = os.path.join(root, "ext", "My.kicad_sym")
+        write(lib, '(kicad_symbol_lib (symbol "R"))\n')
+        write(os.path.join(proj, "sym-lib-table"), table("sym", ("My", "KiCad", fwd(lib))))
+        write(os.path.join(proj, "a.kicad_sch"),
+              '(kicad_sch (lib_symbols (symbol "My:R")) '
+              '(symbol (lib_id "My:R") (property "Reference" "R1")) '
+              '(sheet (property "Sheetfile" "sub/s.kicad_sch")))\n')
+        sub = os.path.join(proj, "sub", "s.kicad_sch")
+        write(sub, '(kicad_sch (lib_symbols (symbol "My:R")) '
+                   '(symbol (lib_id "My:R") (property "Reference" "R2")))\n')
+        assert sorted(r["ref"] for r in rows(proj, "symbol")) == ["R1", "R2"]
+        localize(proj, [r for r in rows(proj, "symbol") if r["wanted"]])
+        assert '"My_local:R"' in read(sub) and '"My:R"' not in read(sub)
+
+
+def test_project_relative_model_paths_are_local():
+    with tmp() as root, env():
+        write(os.path.join(root, "models", "R.step"), "x")
+        for raw in ("$(KIPRJMOD)/models/R.step", "models/R.step", "kicad-embed://R.step"):
+            got = portability.classify(raw, root)
+            assert got == "local", (raw, got)
+
+
+def test_autosave_files_are_ignored():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        write(os.path.join(proj, "_autosave-board.kicad_pcb"),
+              '(kicad_pcb (footprint "Lib:R" (property "Reference" "R1")))\n')
+        files = {r["key"][1] for r in rows(proj)}
+        assert files == {"board.kicad_pcb"}, files
+
+
+def test_standard_check_is_a_path_prefix_not_a_substring():
+    with tmp() as root, env():
+        share = os.path.join(root, "share", "kicad")
+        os.makedirs(os.path.join(share, "footprints"))
+        extra = os.path.join(root, "share", "kicad-extra-libs", "X.pretty")
+        os.makedirs(extra)
+        portability._INSTALL_GLOBS = (share,)
+        assert portability.classify_lib(fwd(extra), os.path.join(root, "proj")) == "external"
+
+
+def _footprint_field(sch_path, index=0):
+    sym = portability._symbol_instances(sexpr.parse(read(sch_path)))[index]
+    return portability._prop(sym, "Footprint")
+
+
+REUSED_SHEET_SYMBOL = (
+    '(kicad_sch (symbol (lib_id "Device:R") (property "Reference" "R101")'
+    ' (property "Footprint" "Lib:R")'
+    ' (instances (project "p" (path "/a" (reference "R101"))'
+    ' (path "/b" (reference "R201"))))))\n')
+
+
+def test_reused_sheet_field_waits_for_every_instance():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R101"))\n'
+                                '\t(footprint "Lib:R" (property "Reference" "R201"))\n')
+        sch = os.path.join(proj, "board.kicad_sch")
+        write(sch, REUSED_SHEET_SYMBOL)
+        localize(proj, [r for r in rows(proj, "footprint") if r["ref"] == "R101"])
+        assert _footprint_field(sch) == "Lib:R", "R201 still uses Lib:R"
+        localize(proj, [r for r in rows(proj, "footprint") if r["ref"] == "R201"])
+        assert _footprint_field(sch) == "Lib_local:R"
+        portability.revert(proj)
+        assert read(sch) == REUSED_SHEET_SYMBOL
+
+
+def test_every_unit_of_a_symbol_gets_the_new_field():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "U1"))\n')
+        sch = os.path.join(proj, "board.kicad_sch")
+        unit = ('(symbol (lib_id "Dual:U") (unit {}) (property "Reference" "U1") '
+                '(property "Footprint" "Lib:R"))')
+        write(sch, "(kicad_sch {} {})\n".format(unit.format(1), unit.format(2)))
+        localize(proj, rows(proj, "footprint"))
+        assert [_footprint_field(sch, i) for i in (0, 1)] == ["Lib_local:R"] * 2
+
+
+def test_unrelated_footprint_field_is_left_alone():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        sch = os.path.join(proj, "board.kicad_sch")
+        write(sch, '(kicad_sch (symbol (lib_id "Device:R") (property "Reference" "R1") '
+                   '(property "Footprint" "Other:Thing")))\n')
+        localize(proj, rows(proj, "footprint"))
+        assert _footprint_field(sch) == "Other:Thing"
+
+
+def _sheet_project(root, sheet_rel, sub_sheets=()):
+    """Root sheet pointing at `sheet_rel`; that sheet may point further."""
+    proj = os.path.join(root, "proj")
+    lib = os.path.join(root, "ext", "My.kicad_sym")
+    write(lib, '(kicad_symbol_lib (symbol "R"))\n')
+    write(os.path.join(proj, "sym-lib-table"), table("sym", ("My", "KiCad", fwd(lib))))
+    write(os.path.join(proj, "a.kicad_sch"),
+          '(kicad_sch (sheet (property "Sheetfile" "{}")))\n'.format(sheet_rel))
+    return proj
+
+
+def _sheet(ref, *children):
+    sheets = "".join(' (sheet (property "Sheetfile" "{}"))'.format(c) for c in children)
+    return ('(kicad_sch (lib_symbols (symbol "My:R")) (symbol (lib_id "My:R") '
+            '(property "Reference" "{}")){})\n'.format(ref, sheets))
+
+
+def test_nested_sheet_path_is_relative_to_its_parent():
+    with tmp() as root, env():
+        proj = _sheet_project(root, "sub/s.kicad_sch")
+        write(os.path.join(proj, "sub", "s.kicad_sch"), _sheet("R1", "deeper/t.kicad_sch"))
+        write(os.path.join(proj, "sub", "deeper", "t.kicad_sch"), _sheet("R2"))
+        assert sorted(r["ref"] for r in rows(proj, "symbol")) == ["R1", "R2"]
+
+
+def test_sheet_outside_the_project_is_never_rewritten():
+    with tmp() as root, env():
+        proj = _sheet_project(root, "../shared/s.kicad_sch")
+        shared = os.path.join(root, "shared", "s.kicad_sch")
+        write(shared, _sheet("R9"))
+        before = read(shared)
+        assert rows(proj, "symbol") == []
+        localize(proj, [r for r in rows(proj) if r["wanted"]])
+        assert read(shared) == before
+
+
+def test_sheet_loops_terminate():
+    with tmp() as root, env():
+        proj = _sheet_project(root, "b.kicad_sch")
+        write(os.path.join(proj, "b.kicad_sch"), _sheet("R1", "a.kicad_sch", "b.kicad_sch"))
+        assert [r["ref"] for r in rows(proj, "symbol")] == ["R1"]
+
+
+def test_local_nickname_counts_up_past_every_taken_name():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        lib = fwd(os.path.join(root, "ext", "Lib.pretty"))
+        write(os.path.join(proj, "fp-lib-table"), table(
+            "fp", ("Lib", "KiCad", lib), ("Lib_local", "KiCad", "/elsewhere/a"),
+            ("Lib_local_1", "KiCad", "/elsewhere/b")))
+        localize(proj, rows(proj, "footprint"))
+        r = rows(proj, "footprint")[0]
+        assert (r["name"], r["status"]) == ("Lib_local_2:R", "local"), r
+        assert os.path.isfile(os.path.join(proj, "libs", "Lib_local_2.pretty", "R.kicad_mod"))
+
+
+def test_second_run_reuses_our_own_local_nickname():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n'
+                                '\t(footprint "Lib:R" (property "Reference" "R2"))\n')
+        localize(proj, [r for r in rows(proj, "footprint") if r["ref"] == "R1"])
+        localize(proj, [r for r in rows(proj, "footprint") if r["ref"] == "R2"])
+        assert {r["name"] for r in rows(proj, "footprint")} == {"Lib_local:R"}
+
+
+def test_non_kicad_footprint_library_is_unsupported():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        lib = fwd(os.path.join(root, "ext", "Lib.pretty"))
+        write(os.path.join(proj, "fp-lib-table"), table("fp", ("Lib", "Legacy", lib)))
+        r = rows(proj, "footprint")[0]
+        assert (r["status"], r["wanted"]) == ("unsupported", False), r
+
+
+def test_library_type_is_case_insensitive():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        lib = fwd(os.path.join(root, "ext", "Lib.pretty"))
+        write(os.path.join(proj, "fp-lib-table"), table("fp", ("Lib", "kicad", lib)))
+        assert rows(proj, "footprint")[0]["status"] == "external"
+
+
+def test_footprint_absent_from_its_library_shows_missing():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:Gone" (property "Reference" "U1"))\n')
+        r = rows(proj, "footprint")[0]
+        assert (r["status"], r["wanted"]) == ("missing", False), r
+
+
+def test_relative_library_uri_is_project_relative():
+    with tmp() as root, env():
+        proj = os.path.join(root, "proj")
+        write(os.path.join(proj, "mylibs", "Lib.pretty", "R.kicad_mod"), '(footprint "R")\n')
+        write(os.path.join(proj, "fp-lib-table"),
+              table("fp", ("Lib", "KiCad", "mylibs/Lib.pretty")))
+        write(os.path.join(proj, "b.kicad_pcb"),
+              '(kicad_pcb (footprint "Lib:R" (property "Reference" "R1")))\n')
+        assert rows(proj, "footprint")[0]["status"] == "local"
+
+
+def test_absolute_path_inside_the_project_is_local():
+    with tmp() as root, env():
+        write(os.path.join(root, "models", "R.step"), "x")
+        assert portability.classify(fwd(os.path.join(root, "models", "R.step")), root) \
+            == "local"
+
+
+def test_embedded_model_is_never_resolved_or_copied():
+    with tmp() as root, env():
+        assert portability.make_resolver(root)("kicad-embed://R.step") == "kicad-embed://R.step"
+
+
+def test_unforced_revert_then_forced_revert_cleans_up():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        table_before = read(os.path.join(proj, "fp-lib-table"))
+        localize(proj, rows(proj, "footprint"))
+        pcb = os.path.join(proj, "board.kicad_pcb")
+        write(pcb, read(pcb).replace("R1", "R9"))
+        res = portability.revert(proj)
+        assert any("kept the local libraries" in e for e in res["errors"]), res
+        assert portability.has_backup(proj)
+        res = portability.revert(proj, force=True)
+        assert res["errors"] == [], res
+        assert read(os.path.join(proj, "fp-lib-table")) == table_before
+        assert not os.path.exists(os.path.join(proj, "libs"))
+        assert not portability.has_backup(proj)
+
+
+def test_unedited_revert_still_removes_everything():
+    with tmp() as root, env():
+        proj = fp_project(root, '\t(footprint "Lib:R" (property "Reference" "R1"))\n')
+        localize(proj, rows(proj, "footprint"))
+        res = portability.revert(proj)
+        assert res["errors"] == [], res
+        assert not os.path.exists(os.path.join(proj, "libs"))
 
 
 if __name__ == "__main__":

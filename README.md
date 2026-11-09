@@ -102,12 +102,15 @@ it and reloading after, and keep important projects under version control.
 
 Each test file runs on its own with `python tests/<file>.py`:
 
-- `test_safety.py` and `test_versions.py`: the engine, pure Python.
+- `test_engine.py`, `test_paths.py`, `test_safety.py` and `test_versions.py`:
+  the engine, pure Python. Editing, library tables and variables, localizing
+  and reverting.
 - `test_dialog.py`: the dialog's prompts. Needs wx and kipy, for example the
   plugin's own KiCad venv.
 - `test_kicad_projects.py`: localizes KiCad's demo projects, then checks with
-  `kicad-cli` that DRC, ERC and the STEP export give the same results with no
-  global libraries configured, and that Revert restores every file exactly.
+  `kicad-cli` that DRC (with schematic parity), ERC and the STEP export give
+  the same results with no global libraries configured, and that Revert
+  restores every file exactly.
   Needs a KiCad install; set `KICAD_CLI` to test a specific one.
 
 KiCad runs the installed copy of the plugin, not this checkout. Run

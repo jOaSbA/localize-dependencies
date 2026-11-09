@@ -156,11 +156,13 @@ def test_revert_keeps_later_edits_unless_forced():
         res = portability.revert(proj)
         assert _bytes(pcb) == edited, "unforced revert overwrote a later edit"
         assert any("board.kicad_pcb" in e for e in res["errors"])
-        assert not os.path.exists(os.path.join(proj, "packages3D", "Parts.3dshapes", "R.step"))
+        # the kept board still points at the local models, so they stay
+        assert os.path.exists(os.path.join(proj, "packages3D", "Parts.3dshapes", "R.step"))
 
         res = portability.revert(proj, force=True)
         assert res["errors"] == [], res
         assert _bytes(pcb) == original
+        assert not os.path.exists(os.path.join(proj, "packages3D"))
         assert not os.path.exists(os.path.join(proj, ".portability"))
     finally:
         shutil.rmtree(root)
