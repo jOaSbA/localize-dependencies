@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 
 import sexpr
@@ -283,6 +284,13 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _copy_in(src, dst):
+    """Copy a library file or model into the project. Content only: KiCad
+    installs its stock libraries read-only, and a copied read-only flag makes
+    KiCad open the project library read-only and stops Revert deleting it."""
+    shutil.copyfile(src, dst)
+
+
 def _read(path):
     """Read a KiCad text file exactly: no newline translation, so CRLF files
     are written back as CRLF."""
@@ -436,6 +444,8 @@ def revert(project_dir, force=False):
         p = os.path.join(project_dir, rel)
         try:
             if os.path.isfile(p):
+                # copies made before 1.0.3 kept the install's read-only flag
+                os.chmod(p, stat.S_IREAD | stat.S_IWRITE)
                 os.remove(p)
                 removed += 1
         except OSError as exc:
@@ -611,7 +621,7 @@ def _place_model(session, resolved):
         if os.path.exists(dst):   # identical content, reuse it
             continue
         session.wrote_new_file(dst)
-        shutil.copy2(src, dst)
+        _copy_in(src, dst)
         session.written(dst)
         copied += 1
     return "${KIPRJMOD}/" + "/".join(parts + [new_stem + ext]), copied
@@ -722,7 +732,7 @@ def localize_footprints(session, rows):
             dst_file = os.path.join(local_dir, name + ".kicad_mod")
             if os.path.isfile(src_file) and not os.path.isfile(dst_file):
                 session.wrote_new_file(dst_file)
-                shutil.copy2(src_file, dst_file)
+                _copy_in(src_file, dst_file)
                 session.written(dst_file)
                 copied += 1
             editor.replace_atom(atom, "{}:{}".format(local_nick, name), force_quote=True)
@@ -770,7 +780,7 @@ def localize_symbols(session, rows):
         session.mkdir(os.path.dirname(local_lib))
         if os.path.isfile(sfile) and not os.path.isfile(local_lib):
             session.wrote_new_file(local_lib)
-            shutil.copy2(sfile, local_lib)
+            _copy_in(sfile, local_lib)
             session.written(local_lib)
             copied += 1
         entries[local_nick] = "${{KIPRJMOD}}/{}/{}.kicad_sym".format(
