@@ -14,12 +14,14 @@
 # License: GPL-3.0-or-later
 
 import filecmp
+import functools
 import glob
 import hashlib
 import json
 import os
 import re
 import shutil
+import sys
 
 import sexpr
 
@@ -38,9 +40,17 @@ _MODEL_DIR_VARS = (
 _INSTALL_GLOBS = (
     r"C:\Program Files\KiCad\*\share\kicad",
     r"C:\Program Files (x86)\KiCad\*\share\kicad",
+    # "Install for me only" puts KiCad under the user's own Programs folder.
+    # %VAR% only expands on Windows; elsewhere the pattern just matches nothing.
+    os.path.expandvars(r"%LOCALAPPDATA%\Programs\KiCad\*\share\kicad"),
     "/usr/share/kicad",
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport",
+    # Flatpak: the stock libraries live in the org.kicad.KiCad.Library
+    # extension, mounted inside the sandbox the plugin also runs in. Issue #2.
+    "/app/extensions/Library",
 )
+# ${KICAD9_FOOTPRINT_DIR} and friends: version number, then the variable kind.
+_VERSIONED_VAR = re.compile(r"KICAD(\d+)_(\w+)")
 
 
 # --- path resolution ---------------------------------------------------------
@@ -58,6 +68,22 @@ def _install_share():
         hits.extend(p for p in glob.glob(pat) if os.path.isdir(p))
     hits.sort(key=_version_key, reverse=True)
     return hits[0] if hits else None
+
+
+def _versioned_env(name):
+    """Value of the newest set KICAD<n>_<kind> for an unset KICAD<m>_<kind>.
+    KiCad resolves an unset ${KICAD9_FOOTPRINT_DIR} through KICAD10_FOOTPRINT_DIR
+    this way, so library tables carried over from an older version keep
+    working. Issue #2."""
+    m = _VERSIONED_VAR.fullmatch(name)
+    if not m:
+        return None
+    hits = []
+    for key, val in os.environ.items():
+        k = _VERSIONED_VAR.fullmatch(key.upper())
+        if val and k and k.group(2) == m.group(2):
+            hits.append((int(k.group(1)), val))
+    return max(hits)[1] if hits else None
 
 
 def make_resolver(project_dir):
@@ -88,7 +114,7 @@ def make_resolver(project_dir):
                 return project_dir
             if name in env_model:
                 return env_model[name]
-            val = os.environ.get(name)
+            val = os.environ.get(name) or _versioned_env(name)
             if val:
                 return val
             for suffix, d in fallbacks.items():
@@ -118,23 +144,85 @@ def parse_lib_table(path):
     return out
 
 
+def _config_base():
+    """KiCad's settings root, found the way KiCad finds it: KICAD_CONFIG_HOME
+    wins, then the platform's user config dir. Under flatpak XDG_CONFIG_HOME
+    points into ~/.var/app/org.kicad.KiCad/config, and ~/.config/kicad belongs
+    to some other KiCad install. Issue #2."""
+    if os.environ.get("KICAD_CONFIG_HOME"):
+        return os.environ["KICAD_CONFIG_HOME"]
+    if os.name == "nt":
+        return os.path.join(os.environ.get("APPDATA", ""), "kicad")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Preferences/kicad")
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                        or os.path.expanduser("~/.config"), "kicad")
+
+
 def _config_dirs():
-    base = os.path.expandvars(r"%APPDATA%\kicad") if os.name == "nt" else \
-        os.path.expanduser("~/.config/kicad")
+    base = _config_base()
     return sorted(glob.glob(os.path.join(base, "*")), key=_version_key,
                   reverse=True) if os.path.isdir(base) else []
 
 
+@functools.lru_cache(maxsize=64)
+def _table_rows(path, stamp):
+    """[(nickname, type, uri)] of one table file. `stamp` (mtime, size) keys the
+    cache, so an edited table is read again. The scan calls this once per
+    footprint, and the stock table alone is ~150 rows."""
+    rows = []
+    for lib in sexpr.parse(_read(path)).find_all("lib"):
+        vals = []
+        for key in ("name", "type", "uri"):
+            node = lib.find(key)
+            vals.append(node.children[1].value
+                        if node and len(node.children) > 1 else None)
+        rows.append(tuple(vals))
+    return rows
+
+
+def _find_in_table(path, nickname, resolve, seen):
+    """uri for `nickname` in one table, following KiCad 10's nested
+    (type "Table") entries. The KiCad 10 global table holds the stock libraries
+    only through such an entry pointing at the install's template table."""
+    path = os.path.normpath(path)
+    if path in seen or not os.path.isfile(path):
+        return None
+    seen.add(path)
+    st = os.stat(path)
+    nested = []
+    for name, typ, uri in _table_rows(path, (st.st_mtime_ns, st.st_size)):
+        if typ == "Table":
+            if uri:
+                nested.append(uri)
+        elif name == nickname and uri:
+            return uri
+    for uri in nested:
+        sub = resolve(uri)
+        share = _install_share()
+        if not os.path.isfile(sub) and share:
+            # The stock-table entry holds the absolute path of the install that
+            # wrote it, which points nowhere once KiCad is reinstalled elsewhere.
+            sub = os.path.join(share, "template", os.path.basename(sub))
+        hit = _find_in_table(sub, nickname, resolve, seen)
+        if hit:
+            return hit
+    return None
+
+
 def resolve_lib_uri(project_dir, table_name, nickname):
-    """Resolve a library nickname to its uri, checking the project table first,
-    then the newest global table."""
-    proj = parse_lib_table(os.path.join(project_dir, table_name))
-    if nickname in proj:
-        return proj[nickname]
-    for d in _config_dirs():
-        g = parse_lib_table(os.path.join(d, table_name))
-        if nickname in g:
-            return g[nickname]
+    """Resolve a library nickname to its uri the way KiCad does: the project
+    table first, then the global table of the newest KiCad version that has
+    one. Older versions' tables are left alone; KiCad never reads them, and
+    their stale ${KICAD9_*} entries are what issue #2 tripped over."""
+    resolve = make_resolver(project_dir)
+    tables = [os.path.join(project_dir, table_name)]
+    tables += [os.path.join(d, table_name) for d in _config_dirs()
+               if os.path.isfile(os.path.join(d, table_name))][:1]
+    for t in tables:
+        hit = _find_in_table(t, nickname, resolve, set())
+        if hit:
+            return hit
     return None
 
 
